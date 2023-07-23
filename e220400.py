@@ -41,6 +41,7 @@ class E220400():
     FIXED_TRANSMISSION = "fixedTransmission";
     LISTEN_BEFORE_TALK = "listenBeforeTalk";
     WAKE_ON_RADIO_TIME = "wakeOnRadioTime";
+    SIGNAL_STRENGTH = "signalStrength";
     NOISE = "noise";
 
     ARRAY_BAUD = [1200,2400,4800,9600,19200,38400,57600,115200];
@@ -53,6 +54,24 @@ class E220400():
     def __init__(self, **kwargs):
         if "port" in kwargs:
             self._port = kwargs.get("port");
+
+    MODE_TRANSMISSION = 0b00;
+    MODE_WOR_TRANSMITTING = 0b01;
+    MODE_WOR_RECEIVING = 0b10;
+    MODE_SLEEP_CONFIG = 0b11;
+
+    def setMode( self, m ):
+        #M0 = dtr
+        #M1 = cts
+        if _port:
+            if m & 1:
+                self._port.drt = True;
+            else:
+                self._port.drt = False;
+            if m & 0b10:
+                self._port.cts = True;
+            else:
+                self._port.cts = False;
 
     def forMachine( self, what , data ):
         print("forMachine {} {}".format(what,data));
@@ -118,6 +137,8 @@ class E220400():
     def consume( self, what , data ):
         if what == self.ADDRESS:
             self._conf[self.ADDRESS] = data[0]<<8 | data[1];
+        elif what == self.SIGNAL_STRENGTH:
+            return " -{} dBm".format( 256 - data[-1] );
         elif what == self.NOISE:
             self._conf[self.NOISE] = "-{} dBm".format( 256 - data[0] );
         elif what == self.REG0:
@@ -177,6 +198,7 @@ def work(  ):
     if initComms():
         e220 = E220400();
         printHeader();
+        lastState = _state;
         try:
             while True:
                 if _state == STATE_HOME:
@@ -196,7 +218,11 @@ def work(  ):
                         while True:
                             rsp = port.read(200);
                             if len(rsp) > 0:
-                                print("\t<<--",rsp.hex(),", ",rsp.decode("utf-8",errors="ignore") );
+                                #e220.
+                                _rssi = "";
+                                if e220 and e220.REG3 in e220._conf and e220._conf[e220.REG3][e220.RSSI_BYTE] == 1:
+                                    _rssi = e220.consume(e220.SIGNAL_STRENGTH,rsp);
+                                print("\t<<--",rsp.hex(),", ",rsp.decode("utf-8",errors="ignore"),_rssi);
                             #time.sleep(0.2);
                     except KeyboardInterrupt:
                         print("- STOPPED LISTENING - ");
@@ -225,6 +251,9 @@ def work(  ):
                         pass;
                         traceback.print_exc();
                 elif _state == STATE_SETTINGS:
+                    if lastState != _state:
+                        #TODO: set mpde
+                        pass
                     print("""
     [ 01 ] - Address
     [ 02 ] - REG 0
@@ -524,6 +553,7 @@ def work(  ):
                         rsp = port.read(200);
                         if len(rsp) > 4:
                             print( e220.consume(None,rsp[3:]));
+            lastState = _state;
         except:
             traceback.print_exc();
             print("err")

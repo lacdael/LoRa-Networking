@@ -4,6 +4,8 @@ import serial.tools.list_ports
 import serial
 import time
 import traceback
+import concurrent.futures
+from threading import Thread
 
 port = None;
 DEFAULT_BAUD = 9600;
@@ -63,15 +65,21 @@ class E220400():
     def setMode( self, m ):
         #M0 = dtr
         #M1 = cts
-        if _port:
-            if m & 1:
-                self._port.drt = True;
+        if self._port:
+            if m == 0b11:
+                self._port.setDTR( False );
+                self._port.setRTS( False );
             else:
-                self._port.drt = False;
-            if m & 0b10:
-                self._port.cts = True;
-            else:
-                self._port.cts = False;
+                self._port.setDTR( True );
+                self._port.setRTS( True );
+            #if m & 1:
+            #    self._port.drt = True;
+            #else:
+            #    self._port.drt = False;
+            #if m & 0b10:
+            #    self._port.cts = True;
+            #else:
+            #    self._port.cts = False;
 
     def forMachine( self, what , data ):
         print("forMachine {} {}".format(what,data));
@@ -150,7 +158,7 @@ class E220400():
             self._conf[self.REG1][self.RSSI_NOISE_DETECT] = (data[0]>>5)&0b1;
             self._conf[self.REG1][self.POWER] = self.forHuman(self.POWER,data[0]&0b11);
         elif what == self.CHANNEL:
-            self._conf[self.CHANNEL] = data[0] + 1;
+            self._conf[self.CHANNEL] = data[0];
         elif what == self.REG3:
             self._conf[self.REG3][self.RSSI_BYTE] = (data[0]>>7)&0b1;
             self._conf[self.REG3][self.FIXED_TRANSMISSION] = (data[0]>>6)&0b1;
@@ -180,11 +188,12 @@ def initComms():
     return port.is_open;
 
 def printHeader():
-    s = "\n[L]isten   [S]end  se[T]tings";
+    s = "\nte[R]minal  se[T]tings";
     if e220 and e220._conf[e220.REG1][e220.RSSI_NOISE_DETECT] == 1:
         s += " [N]oise"
     print(s);
 
+STATE_TERMINAL = "r";
 STATE_LISTEN = "l";
 STATE_SEND = "s";
 STATE_SETTINGS = "t";
@@ -203,7 +212,13 @@ def work(  ):
             while True:
                 if _state == STATE_HOME:
                     v = input();
-                    if v in [ STATE_LISTEN,STATE_SEND,STATE_SETTINGS]:
+                    if v in [ STATE_TERMINAL,STATE_LISTEN,STATE_SEND,STATE_SETTINGS]:
+                        if v == STATE_SETTINGS:
+                            port.setDTR( False );
+                            port.setRTS( False );
+                        else:
+                            port.setDTR( True );
+                            port.setRTS( True );
                         _state = v;
                     elif v == "n":
                         d = bytes([0xC0,0xC1,0xC2,0xC3,0x00,0x01]);
@@ -213,47 +228,60 @@ def work(  ):
                         if len(rsp) == 4:
                             print( e220.consume(e220.NOISE,rsp[3:]));
 
-                if _state == STATE_LISTEN:
+                if _state == STATE_TERMINAL:
+                    
+                    def process_input( s ):
+                        try:
+                            if len(s) > 0:
+                                if len(s) > 5 and s[4] == '#':
+                                    c = int( s[0:2],16);
+                                    a = int( s[2:4],16);
+                                    d = s[5: ];
+                                    d += '\n'
+                                    data = bytearray([(a>>8)&0xFF,a&0xFF,c ]);
+                                    data += d.encode();
+                                else:
+                                    s+='\n'
+                                    data = s.encode();
+                                port.write( data );
+                                port.flush();
+                                #rsp = port.read(200);
+                                #if rsp:
+                                #    print( f"<<--{rsp.decode('utf-8',errors='ignore')}" )
+                        except:
+                            traceback.print_exc();
+                        return "";
+
+                    def readPort(port):
+                        global _state
+                        while _state == STATE_TERMINAL:
+                            try:
+                                rsp = port.read(200);
+                                if len(rsp) > 0:
+                                    _rssi = "";
+                                    if ( e220 and e220.REG3 in e220._conf and
+                                        e220.RSSI_BYTE in e220._conf[e220.REG3] and
+                                        e220._conf[e220.REG3][e220.RSSI_BYTE] == 1 ):
+                                        _rssi = e220.consume(e220.SIGNAL_STRENGTH,rsp);
+                                    s = f"\r<<--{ rsp.decode('utf-8',errors='ignore') } {_rssi}"
+                                    print( s.rjust(40,' ') )
+                            except KeyboardInterrupt:
+                                break;
+                            except serial.serialutil.SerialException:
+                                break;
+                    
+
+                    t = Thread( target = readPort, args=[port] );
+                    t.start();
                     try:
                         while True:
-                            rsp = port.read(200);
-                            if len(rsp) > 0:
-                                #e220.
-                                _rssi = "";
-                                if e220 and e220.REG3 in e220._conf and e220._conf[e220.REG3][e220.RSSI_BYTE] == 1:
-                                    _rssi = e220.consume(e220.SIGNAL_STRENGTH,rsp);
-                                print("\t<<--",rsp.hex(),", ",rsp.decode("utf-8",errors="ignore"),_rssi);
-                            #time.sleep(0.2);
-                    except KeyboardInterrupt:
-                        print("- STOPPED LISTENING - ");
-                        _state = STATE_HOME;
-                        printHeader();
+                            user_input = input("message: ");
+                            process_input( user_input );
                     except:
-                        traceback.print_exc();
-                elif _state == STATE_SEND:
-                    try:
-                        a = int(input("Input address: "),0);
-                        c = int(input("Input Channel:"));
-                        d = input("Input data to send, (prefix 0x for bytes)");
-                        data = bytearray([(a>>8)&0xFF,a&0xFF,c - 1]);
-                        data += d.encode();
-                        port.write( data );
-                        port.flush();
-                        print("\t-->>", data.hex(),", ",d );
-                        rsp = port.read(200);
-                        if rsp:
-                            print("\t<<--",rsp.hex(),", ",rsp.decode("utf-8",errors="ignore") );
-                    except KeyboardInterrupt:
-                        print("- STOPPED LISTENING - ");
-                        _state = STATE_HOME;
-                        printHeader();
-                    except:
-                        pass;
-                        traceback.print_exc();
+                        t.join();
+
+
                 elif _state == STATE_SETTINGS:
-                    if lastState != _state:
-                        #TODO: set mpde
-                        pass
                     print("""
     [ 01 ] - Address
     [ 02 ] - REG 0
@@ -444,9 +472,9 @@ def work(  ):
                         r_w = input("[R]ead/[W]rite(R):");
                         if r_w == "w":
                             try:
-                                channel = int(input("Input a channel (1-84):"));
-                                if ( channel >=1 and channel <= 84 ):
-                                    channel -= 1;
+                                channel = int(input("Input a channel (0-83):"));
+                                if ( channel >=0 and channel <= 84 ):
+                                    #channel -= 1;
                                     d = bytes([0xC0,0x04,0x01,channel]);
                                     port.write(d);
                                     rsp = port.read(200);
